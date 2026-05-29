@@ -13,8 +13,11 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
+
+const rateLimitCacheTTL = 30 * time.Second
 
 // OpenAIClient is a client for interacting with the OpenAI API
 type OpenAIClient struct {
@@ -23,6 +26,24 @@ type OpenAIClient struct {
 	APIURL         string
 	HTTPClient     *http.Client
 	Timeout        time.Duration // Timeout for all requests
+
+	rateLimitCacheMu         sync.Mutex
+	rateLimitCache           map[string]rateLimitCacheEntry
+	rateLimitCacheLoads      map[string]*rateLimitCacheLoad
+	rateLimitCacheGeneration map[string]uint64
+}
+
+type rateLimitCacheEntry struct {
+	expiresAt time.Time
+	byModel   map[string]RateLimit
+	byID      map[string]RateLimit
+}
+
+type rateLimitCacheLoad struct {
+	done  chan struct{}
+	entry rateLimitCacheEntry
+	err   error
+	stale bool
 }
 
 // NewClient creates a new instance of the OpenAI client
@@ -68,7 +89,10 @@ func NewClient(apiKey, organizationID, apiURL string) *OpenAIClient {
 			Transport: transport,
 			Timeout:   defaultTimeout,
 		},
-		Timeout: defaultTimeout,
+		Timeout:                  defaultTimeout,
+		rateLimitCache:           make(map[string]rateLimitCacheEntry),
+		rateLimitCacheLoads:      make(map[string]*rateLimitCacheLoad),
+		rateLimitCacheGeneration: make(map[string]uint64),
 	}
 
 	return client
@@ -129,7 +153,10 @@ func NewClientWithConfig(config ClientConfig) *OpenAIClient {
 			Transport: transport,
 			Timeout:   config.Timeout,
 		},
-		Timeout: config.Timeout,
+		Timeout:                  config.Timeout,
+		rateLimitCache:           make(map[string]rateLimitCacheEntry),
+		rateLimitCacheLoads:      make(map[string]*rateLimitCacheLoad),
+		rateLimitCacheGeneration: make(map[string]uint64),
 	}
 }
 
@@ -1292,6 +1319,7 @@ func (c *OpenAIClient) CreateRateLimit(projectID, resourceType, limitType string
 	if err != nil {
 		return nil, err
 	}
+	c.invalidateRateLimitCache(projectID)
 
 	// Parse the response
 	var rateLimit RateLimit
@@ -1300,6 +1328,145 @@ func (c *OpenAIClient) CreateRateLimit(projectID, resourceType, limitType string
 	}
 
 	return &rateLimit, nil
+}
+
+func (c *OpenAIClient) ensureRateLimitCacheLocked() {
+	if c.rateLimitCache == nil {
+		c.rateLimitCache = make(map[string]rateLimitCacheEntry)
+	}
+	if c.rateLimitCacheLoads == nil {
+		c.rateLimitCacheLoads = make(map[string]*rateLimitCacheLoad)
+	}
+	if c.rateLimitCacheGeneration == nil {
+		c.rateLimitCacheGeneration = make(map[string]uint64)
+	}
+}
+
+func (c *OpenAIClient) invalidateRateLimitCache(projectID string) {
+	c.rateLimitCacheMu.Lock()
+	defer c.rateLimitCacheMu.Unlock()
+
+	c.ensureRateLimitCacheLocked()
+	delete(c.rateLimitCache, projectID)
+	c.rateLimitCacheGeneration[projectID]++
+}
+
+func (c *OpenAIClient) cachedRateLimits(projectID string) (rateLimitCacheEntry, error) {
+	for {
+		now := time.Now()
+
+		c.rateLimitCacheMu.Lock()
+		c.ensureRateLimitCacheLocked()
+		if entry, ok := c.rateLimitCache[projectID]; ok && now.Before(entry.expiresAt) {
+			c.rateLimitCacheMu.Unlock()
+			return entry, nil
+		}
+		if load, ok := c.rateLimitCacheLoads[projectID]; ok {
+			c.rateLimitCacheMu.Unlock()
+			<-load.done
+			if load.err != nil {
+				return rateLimitCacheEntry{}, load.err
+			}
+			if load.stale {
+				continue
+			}
+			return load.entry, nil
+		}
+
+		generation := c.rateLimitCacheGeneration[projectID]
+		load := &rateLimitCacheLoad{done: make(chan struct{})}
+		c.rateLimitCacheLoads[projectID] = load
+		c.rateLimitCacheMu.Unlock()
+
+		entry, err := c.fetchRateLimits(projectID)
+
+		c.rateLimitCacheMu.Lock()
+		currentGeneration := c.rateLimitCacheGeneration[projectID]
+		stale := currentGeneration != generation
+		if err == nil && !stale {
+			c.rateLimitCache[projectID] = entry
+		}
+		load.entry = entry
+		load.err = err
+		load.stale = stale
+		delete(c.rateLimitCacheLoads, projectID)
+		close(load.done)
+		c.rateLimitCacheMu.Unlock()
+
+		if err != nil {
+			return rateLimitCacheEntry{}, err
+		}
+		if stale {
+			continue
+		}
+		return entry, nil
+	}
+}
+
+func (c *OpenAIClient) fetchRateLimits(projectID string) (rateLimitCacheEntry, error) {
+	var allRateLimits []RateLimit
+	limit := 100
+	after := ""
+
+	for {
+		rateLimits, err := c.ListRateLimits(projectID, limit, after)
+		if err != nil {
+			return rateLimitCacheEntry{}, fmt.Errorf("failed to list rate limits: %w", err)
+		}
+
+		allRateLimits = append(allRateLimits, rateLimits.Data...)
+
+		if !rateLimits.HasMore {
+			break
+		}
+		after = rateLimits.LastID
+	}
+
+	return newRateLimitCacheEntry(allRateLimits), nil
+}
+
+func newRateLimitCacheEntry(rateLimits []RateLimit) rateLimitCacheEntry {
+	entry := rateLimitCacheEntry{
+		expiresAt: time.Now().Add(rateLimitCacheTTL),
+		byModel:   make(map[string]RateLimit, len(rateLimits)),
+		byID:      make(map[string]RateLimit, len(rateLimits)),
+	}
+
+	for _, rateLimit := range rateLimits {
+		cached := cloneRateLimitValue(rateLimit)
+		if _, ok := entry.byModel[cached.Model]; !ok {
+			entry.byModel[cached.Model] = cached
+		}
+		if _, ok := entry.byID[cached.ID]; !ok {
+			entry.byID[cached.ID] = cached
+		}
+	}
+
+	return entry
+}
+
+func cloneRateLimitValue(rateLimit RateLimit) RateLimit {
+	clone := rateLimit
+	clone.MaxRequestsPer1Minute = cloneInt64Pointer(rateLimit.MaxRequestsPer1Minute)
+	clone.MaxTokensPer1Minute = cloneInt64Pointer(rateLimit.MaxTokensPer1Minute)
+	clone.MaxImagesPer1Minute = cloneInt64Pointer(rateLimit.MaxImagesPer1Minute)
+	clone.Batch1DayMaxInputTokens = cloneInt64Pointer(rateLimit.Batch1DayMaxInputTokens)
+	clone.MaxAudioMegabytesPer1Minute = cloneInt64Pointer(rateLimit.MaxAudioMegabytesPer1Minute)
+	clone.MaxRequestsPer1Day = cloneInt64Pointer(rateLimit.MaxRequestsPer1Day)
+	return clone
+}
+
+func cloneRateLimit(rateLimit RateLimit) *RateLimit {
+	clone := cloneRateLimitValue(rateLimit)
+	return &clone
+}
+
+func cloneInt64Pointer(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
 }
 
 // GetRateLimit retrieves information about a specific rate limit by model name or rate limit ID.
@@ -1313,23 +1480,9 @@ func (c *OpenAIClient) CreateRateLimit(projectID, resourceType, limitType string
 //   - A RateLimit object with details about the requested rate limit
 //   - An error if the operation failed or the rate limit doesn't exist
 func (c *OpenAIClient) GetRateLimit(projectID, modelOrRateLimitID string) (*RateLimit, error) {
-	// Pagination loop to find the rate limit
-	var allRateLimits []RateLimit
-	limit := 100
-	after := ""
-
-	for {
-		rateLimits, err := c.ListRateLimits(projectID, limit, after)
-		if err != nil {
-			return nil, fmt.Errorf("failed to list rate limits: %w", err)
-		}
-
-		allRateLimits = append(allRateLimits, rateLimits.Data...)
-
-		if !rateLimits.HasMore {
-			break
-		}
-		after = rateLimits.LastID
+	rateLimits, err := c.cachedRateLimits(projectID)
+	if err != nil {
+		return nil, err
 	}
 
 	// Normalize the search - if it's a rate limit ID, extract the model name
@@ -1339,17 +1492,13 @@ func (c *OpenAIClient) GetRateLimit(projectID, modelOrRateLimitID string) (*Rate
 	}
 
 	// Search for exact model match first
-	for i := range allRateLimits {
-		if allRateLimits[i].Model == searchModel {
-			return &allRateLimits[i], nil
-		}
+	if rateLimit, ok := rateLimits.byModel[searchModel]; ok {
+		return cloneRateLimit(rateLimit), nil
 	}
 
 	// Try exact ID match
-	for i := range allRateLimits {
-		if allRateLimits[i].ID == modelOrRateLimitID {
-			return &allRateLimits[i], nil
-		}
+	if rateLimit, ok := rateLimits.byID[modelOrRateLimitID]; ok {
+		return cloneRateLimit(rateLimit), nil
 	}
 
 	return nil, fmt.Errorf("rate limit not found for model/ID '%s' in project '%s'", modelOrRateLimitID, projectID)
@@ -1358,6 +1507,8 @@ func (c *OpenAIClient) GetRateLimit(projectID, modelOrRateLimitID string) (*Rate
 // UpdateRateLimit modifies an existing rate limit for a project.
 // Uses POST to /v1/organization/projects/{project_id}/rate_limits/{rate_limit_id}
 func (c *OpenAIClient) UpdateRateLimit(projectID, modelOrRateLimitID string, maxRequestsPerMinute, maxTokensPerMinute, maxImagesPerMinute, batch1DayMaxInputTokens, maxAudioMegabytesPer1Minute, maxRequestsPer1Day *int) (*RateLimit, error) {
+	c.invalidateRateLimitCache(projectID)
+
 	// First, find the rate limit to get its ID
 	targetRateLimit, err := c.GetRateLimit(projectID, modelOrRateLimitID)
 	if err != nil {
@@ -1395,6 +1546,7 @@ func (c *OpenAIClient) UpdateRateLimit(projectID, modelOrRateLimitID string, max
 	if err != nil {
 		return nil, err
 	}
+	c.invalidateRateLimitCache(projectID)
 
 	// Parse the response
 	var rateLimit RateLimit
@@ -1416,6 +1568,8 @@ func (c *OpenAIClient) UpdateRateLimit(projectID, modelOrRateLimitID string, max
 // Returns:
 //   - An error if the operation failed
 func (c *OpenAIClient) DeleteRateLimit(projectID, modelOrRateLimitID string) error {
+	c.invalidateRateLimitCache(projectID)
+
 	// Find the rate limit to get its ID and model
 	targetRateLimit, err := c.GetRateLimit(projectID, modelOrRateLimitID)
 	if err != nil {
@@ -1452,6 +1606,9 @@ func (c *OpenAIClient) DeleteRateLimit(projectID, modelOrRateLimitID string) err
 
 	// Send POST request to reset the rate limit to default values
 	_, err = c.doRequest(http.MethodPost, path, req)
+	if err == nil {
+		c.invalidateRateLimitCache(projectID)
+	}
 	return err
 }
 
