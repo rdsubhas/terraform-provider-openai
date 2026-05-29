@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -17,7 +19,22 @@ import (
 	"time"
 )
 
-const rateLimitCacheTTL = 30 * time.Second
+const (
+	rateLimitCacheTTL             = 30 * time.Second
+	rateLimitFileCacheVersion     = 1
+	rateLimitFileCacheLockTimeout = 5 * time.Second
+	rateLimitFileCacheLockPoll    = 25 * time.Millisecond
+	rateLimitFileCacheLockStale   = 2 * time.Minute
+)
+
+var (
+	sharedRateLimitCache = rateLimitCacheStore{
+		memory:     make(map[string]rateLimitCacheEntry),
+		loads:      make(map[string]*rateLimitCacheLoad),
+		generation: make(map[string]uint64),
+	}
+	rateLimitFileCacheMu sync.Mutex
+)
 
 // OpenAIClient is a client for interacting with the OpenAI API
 type OpenAIClient struct {
@@ -26,17 +43,20 @@ type OpenAIClient struct {
 	APIURL         string
 	HTTPClient     *http.Client
 	Timeout        time.Duration // Timeout for all requests
+}
 
-	rateLimitCacheMu         sync.Mutex
-	rateLimitCache           map[string]rateLimitCacheEntry
-	rateLimitCacheLoads      map[string]*rateLimitCacheLoad
-	rateLimitCacheGeneration map[string]uint64
+type rateLimitCacheStore struct {
+	mu         sync.Mutex
+	memory     map[string]rateLimitCacheEntry
+	loads      map[string]*rateLimitCacheLoad
+	generation map[string]uint64
 }
 
 type rateLimitCacheEntry struct {
-	expiresAt time.Time
-	byModel   map[string]RateLimit
-	byID      map[string]RateLimit
+	expiresAt  time.Time
+	rateLimits []RateLimit
+	byModel    map[string]RateLimit
+	byID       map[string]RateLimit
 }
 
 type rateLimitCacheLoad struct {
@@ -44,6 +64,16 @@ type rateLimitCacheLoad struct {
 	entry rateLimitCacheEntry
 	err   error
 	stale bool
+}
+
+type rateLimitFileCache struct {
+	Version int                               `json:"version"`
+	Entries map[string]rateLimitFileCacheItem `json:"entries"`
+}
+
+type rateLimitFileCacheItem struct {
+	ExpiresAt  time.Time   `json:"expires_at"`
+	RateLimits []RateLimit `json:"rate_limits"`
 }
 
 // NewClient creates a new instance of the OpenAI client
@@ -89,10 +119,7 @@ func NewClient(apiKey, organizationID, apiURL string) *OpenAIClient {
 			Transport: transport,
 			Timeout:   defaultTimeout,
 		},
-		Timeout:                  defaultTimeout,
-		rateLimitCache:           make(map[string]rateLimitCacheEntry),
-		rateLimitCacheLoads:      make(map[string]*rateLimitCacheLoad),
-		rateLimitCacheGeneration: make(map[string]uint64),
+		Timeout: defaultTimeout,
 	}
 
 	return client
@@ -153,10 +180,7 @@ func NewClientWithConfig(config ClientConfig) *OpenAIClient {
 			Transport: transport,
 			Timeout:   config.Timeout,
 		},
-		Timeout:                  config.Timeout,
-		rateLimitCache:           make(map[string]rateLimitCacheEntry),
-		rateLimitCacheLoads:      make(map[string]*rateLimitCacheLoad),
-		rateLimitCacheGeneration: make(map[string]uint64),
+		Timeout: config.Timeout,
 	}
 }
 
@@ -1330,39 +1354,61 @@ func (c *OpenAIClient) CreateRateLimit(projectID, resourceType, limitType string
 	return &rateLimit, nil
 }
 
-func (c *OpenAIClient) ensureRateLimitCacheLocked() {
-	if c.rateLimitCache == nil {
-		c.rateLimitCache = make(map[string]rateLimitCacheEntry)
+func (s *rateLimitCacheStore) ensureLocked() {
+	if s.memory == nil {
+		s.memory = make(map[string]rateLimitCacheEntry)
 	}
-	if c.rateLimitCacheLoads == nil {
-		c.rateLimitCacheLoads = make(map[string]*rateLimitCacheLoad)
+	if s.loads == nil {
+		s.loads = make(map[string]*rateLimitCacheLoad)
 	}
-	if c.rateLimitCacheGeneration == nil {
-		c.rateLimitCacheGeneration = make(map[string]uint64)
+	if s.generation == nil {
+		s.generation = make(map[string]uint64)
 	}
+}
+
+func (c *OpenAIClient) rateLimitCacheKey(projectID string) string {
+	identity := c.OrganizationID
+	if identity == "" {
+		apiKeyHash := sha256.Sum256([]byte(c.APIKey))
+		identity = fmt.Sprintf("key:%x", apiKeyHash)
+	}
+
+	apiURL := strings.TrimSuffix(strings.TrimSuffix(c.APIURL, "/"), "/v1")
+	cacheKeyHash := sha256.Sum256([]byte(strings.Join([]string{
+		apiURL,
+		identity,
+		projectID,
+	}, "\x00")))
+
+	return fmt.Sprintf("%x", cacheKeyHash)
 }
 
 func (c *OpenAIClient) invalidateRateLimitCache(projectID string) {
-	c.rateLimitCacheMu.Lock()
-	defer c.rateLimitCacheMu.Unlock()
+	cacheKey := c.rateLimitCacheKey(projectID)
 
-	c.ensureRateLimitCacheLocked()
-	delete(c.rateLimitCache, projectID)
-	c.rateLimitCacheGeneration[projectID]++
+	sharedRateLimitCache.mu.Lock()
+	defer sharedRateLimitCache.mu.Unlock()
+
+	sharedRateLimitCache.ensureLocked()
+	delete(sharedRateLimitCache.memory, cacheKey)
+	sharedRateLimitCache.generation[cacheKey]++
+	_ = deleteRateLimitFileCacheEntry(cacheKey)
 }
 
 func (c *OpenAIClient) cachedRateLimits(projectID string) (rateLimitCacheEntry, error) {
+	cacheKey := c.rateLimitCacheKey(projectID)
+
 	for {
 		now := time.Now()
 
-		c.rateLimitCacheMu.Lock()
-		c.ensureRateLimitCacheLocked()
-		if entry, ok := c.rateLimitCache[projectID]; ok && now.Before(entry.expiresAt) {
-			c.rateLimitCacheMu.Unlock()
+		sharedRateLimitCache.mu.Lock()
+		sharedRateLimitCache.ensureLocked()
+		if entry, ok := sharedRateLimitCache.memory[cacheKey]; ok && now.Before(entry.expiresAt) {
+			sharedRateLimitCache.mu.Unlock()
 			return entry, nil
 		}
-		if load, ok := c.rateLimitCacheLoads[projectID]; ok {
-			c.rateLimitCacheMu.Unlock()
+		if load, ok := sharedRateLimitCache.loads[cacheKey]; ok {
+			sharedRateLimitCache.mu.Unlock()
 			<-load.done
 			if load.err != nil {
 				return rateLimitCacheEntry{}, load.err
@@ -1373,25 +1419,28 @@ func (c *OpenAIClient) cachedRateLimits(projectID string) (rateLimitCacheEntry, 
 			return load.entry, nil
 		}
 
-		generation := c.rateLimitCacheGeneration[projectID]
+		generation := sharedRateLimitCache.generation[cacheKey]
 		load := &rateLimitCacheLoad{done: make(chan struct{})}
-		c.rateLimitCacheLoads[projectID] = load
-		c.rateLimitCacheMu.Unlock()
+		sharedRateLimitCache.loads[cacheKey] = load
+		sharedRateLimitCache.mu.Unlock()
 
-		entry, err := c.fetchRateLimits(projectID)
+		entry, fromFile, err := c.loadRateLimitCacheEntry(projectID, cacheKey, now)
 
-		c.rateLimitCacheMu.Lock()
-		currentGeneration := c.rateLimitCacheGeneration[projectID]
+		sharedRateLimitCache.mu.Lock()
+		currentGeneration := sharedRateLimitCache.generation[cacheKey]
 		stale := currentGeneration != generation
 		if err == nil && !stale {
-			c.rateLimitCache[projectID] = entry
+			sharedRateLimitCache.memory[cacheKey] = entry
+			if !fromFile {
+				_ = writeRateLimitFileCacheEntry(cacheKey, entry)
+			}
 		}
 		load.entry = entry
 		load.err = err
 		load.stale = stale
-		delete(c.rateLimitCacheLoads, projectID)
+		delete(sharedRateLimitCache.loads, cacheKey)
 		close(load.done)
-		c.rateLimitCacheMu.Unlock()
+		sharedRateLimitCache.mu.Unlock()
 
 		if err != nil {
 			return rateLimitCacheEntry{}, err
@@ -1401,6 +1450,15 @@ func (c *OpenAIClient) cachedRateLimits(projectID string) (rateLimitCacheEntry, 
 		}
 		return entry, nil
 	}
+}
+
+func (c *OpenAIClient) loadRateLimitCacheEntry(projectID, cacheKey string, now time.Time) (rateLimitCacheEntry, bool, error) {
+	if entry, ok := readRateLimitFileCacheEntry(cacheKey, now); ok {
+		return entry, true, nil
+	}
+
+	entry, err := c.fetchRateLimits(projectID)
+	return entry, false, err
 }
 
 func (c *OpenAIClient) fetchRateLimits(projectID string) (rateLimitCacheEntry, error) {
@@ -1426,14 +1484,20 @@ func (c *OpenAIClient) fetchRateLimits(projectID string) (rateLimitCacheEntry, e
 }
 
 func newRateLimitCacheEntry(rateLimits []RateLimit) rateLimitCacheEntry {
+	return newRateLimitCacheEntryWithExpiry(rateLimits, time.Now().Add(rateLimitCacheTTL))
+}
+
+func newRateLimitCacheEntryWithExpiry(rateLimits []RateLimit, expiresAt time.Time) rateLimitCacheEntry {
 	entry := rateLimitCacheEntry{
-		expiresAt: time.Now().Add(rateLimitCacheTTL),
-		byModel:   make(map[string]RateLimit, len(rateLimits)),
-		byID:      make(map[string]RateLimit, len(rateLimits)),
+		expiresAt:  expiresAt,
+		rateLimits: make([]RateLimit, 0, len(rateLimits)),
+		byModel:    make(map[string]RateLimit, len(rateLimits)),
+		byID:       make(map[string]RateLimit, len(rateLimits)),
 	}
 
 	for _, rateLimit := range rateLimits {
 		cached := cloneRateLimitValue(rateLimit)
+		entry.rateLimits = append(entry.rateLimits, cached)
 		if _, ok := entry.byModel[cached.Model]; !ok {
 			entry.byModel[cached.Model] = cached
 		}
@@ -1443,6 +1507,197 @@ func newRateLimitCacheEntry(rateLimits []RateLimit) rateLimitCacheEntry {
 	}
 
 	return entry
+}
+
+func readRateLimitFileCacheEntry(cacheKey string, now time.Time) (rateLimitCacheEntry, bool) {
+	var entry rateLimitCacheEntry
+	hit := false
+
+	err := withRateLimitFileCacheLock(func(path string) error {
+		cache, err := readRateLimitFileCache(path)
+		if err != nil {
+			return err
+		}
+
+		item, ok := cache.Entries[cacheKey]
+		if !ok || !now.Before(item.ExpiresAt) {
+			return nil
+		}
+
+		entry = newRateLimitCacheEntryWithExpiry(item.RateLimits, item.ExpiresAt)
+		hit = true
+		return nil
+	})
+
+	if err != nil {
+		return rateLimitCacheEntry{}, false
+	}
+
+	return entry, hit
+}
+
+func writeRateLimitFileCacheEntry(cacheKey string, entry rateLimitCacheEntry) error {
+	return withRateLimitFileCacheLock(func(path string) error {
+		cache, _ := readRateLimitFileCache(path)
+		pruneRateLimitFileCache(&cache, time.Now())
+
+		cache.Entries[cacheKey] = rateLimitFileCacheItem{
+			ExpiresAt:  entry.expiresAt,
+			RateLimits: cloneRateLimitValues(entry.rateLimits),
+		}
+
+		return writeRateLimitFileCache(path, cache)
+	})
+}
+
+func deleteRateLimitFileCacheEntry(cacheKey string) error {
+	return withRateLimitFileCacheLock(func(path string) error {
+		cache, err := readRateLimitFileCache(path)
+		if err != nil {
+			return nil
+		}
+
+		if _, ok := cache.Entries[cacheKey]; !ok {
+			return nil
+		}
+
+		delete(cache.Entries, cacheKey)
+		return writeRateLimitFileCache(path, cache)
+	})
+}
+
+func withRateLimitFileCacheLock(fn func(string) error) error {
+	cachePath, lockPath, err := rateLimitFileCachePaths()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0700); err != nil {
+		return err
+	}
+
+	rateLimitFileCacheMu.Lock()
+	defer rateLimitFileCacheMu.Unlock()
+
+	lockFile, err := acquireRateLimitFileCacheLock(lockPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = lockFile.Close()
+		_ = os.Remove(lockPath)
+	}()
+
+	return fn(cachePath)
+}
+
+func rateLimitFileCachePaths() (string, string, error) {
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		cacheDir = os.TempDir()
+	}
+
+	cacheDir = filepath.Join(cacheDir, "terraform-provider-openai")
+	return filepath.Join(cacheDir, "rate-limits-cache.json"), filepath.Join(cacheDir, "rate-limits-cache.lock"), nil
+}
+
+func acquireRateLimitFileCacheLock(lockPath string) (*os.File, error) {
+	deadline := time.Now().Add(rateLimitFileCacheLockTimeout)
+
+	for {
+		lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err == nil {
+			_, _ = fmt.Fprintf(lockFile, "%d\n", os.Getpid())
+			return lockFile, nil
+		}
+		if !os.IsExist(err) {
+			return nil, err
+		}
+
+		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > rateLimitFileCacheLockStale {
+			_ = os.Remove(lockPath)
+			continue
+		}
+		if time.Now().After(deadline) {
+			return nil, err
+		}
+
+		time.Sleep(rateLimitFileCacheLockPoll)
+	}
+}
+
+func readRateLimitFileCache(path string) (rateLimitFileCache, error) {
+	cache := rateLimitFileCache{
+		Version: rateLimitFileCacheVersion,
+		Entries: make(map[string]rateLimitFileCacheItem),
+	}
+
+	body, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return cache, nil
+	}
+	if err != nil {
+		return cache, err
+	}
+	if len(body) == 0 {
+		return cache, nil
+	}
+
+	var parsed rateLimitFileCache
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return cache, nil
+	}
+	if parsed.Version != rateLimitFileCacheVersion || parsed.Entries == nil {
+		return cache, nil
+	}
+
+	return parsed, nil
+}
+
+func writeRateLimitFileCache(path string, cache rateLimitFileCache) error {
+	cache.Version = rateLimitFileCacheVersion
+	if cache.Entries == nil {
+		cache.Entries = make(map[string]rateLimitFileCacheItem)
+	}
+
+	body, err := json.Marshal(cache)
+	if err != nil {
+		return err
+	}
+
+	tempFile, err := os.CreateTemp(filepath.Dir(path), ".rate-limits-cache-*.json")
+	if err != nil {
+		return err
+	}
+	tempPath := tempFile.Name()
+	defer func() {
+		_ = os.Remove(tempPath)
+	}()
+
+	if _, err := tempFile.Write(body); err != nil {
+		_ = tempFile.Close()
+		return err
+	}
+	if err := tempFile.Close(); err != nil {
+		return err
+	}
+
+	return os.Rename(tempPath, path)
+}
+
+func pruneRateLimitFileCache(cache *rateLimitFileCache, now time.Time) {
+	for cacheKey, item := range cache.Entries {
+		if !now.Before(item.ExpiresAt) {
+			delete(cache.Entries, cacheKey)
+		}
+	}
+}
+
+func cloneRateLimitValues(rateLimits []RateLimit) []RateLimit {
+	clones := make([]RateLimit, 0, len(rateLimits))
+	for _, rateLimit := range rateLimits {
+		clones = append(clones, cloneRateLimitValue(rateLimit))
+	}
+	return clones
 }
 
 func cloneRateLimitValue(rateLimit RateLimit) RateLimit {
