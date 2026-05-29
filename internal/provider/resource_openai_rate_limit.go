@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -18,11 +20,132 @@ var _ resource.Resource = &RateLimitResource{}
 var _ resource.ResourceWithImportState = &RateLimitResource{}
 
 type RateLimitResource struct {
-	client *client.OpenAIClient
+	client               *client.OpenAIClient
+	rateLimitCache       *rateLimitProjectCache
+	rateLimitCacheInitMu sync.Mutex
 }
 
 func NewRateLimitResource() resource.Resource {
-	return &RateLimitResource{}
+	return &RateLimitResource{
+		rateLimitCache: newRateLimitProjectCache(30 * time.Second),
+	}
+}
+
+type rateLimitProjectCache struct {
+	mu       sync.Mutex
+	ttl      time.Duration
+	entries  map[string]rateLimitProjectCacheEntry
+	inflight map[string]*rateLimitProjectCacheInflight
+}
+
+type rateLimitProjectCacheEntry struct {
+	fetchedAt time.Time
+	limits    []client.RateLimit
+}
+
+type rateLimitProjectCacheInflight struct {
+	done   chan struct{}
+	limits []client.RateLimit
+	err    error
+}
+
+func newRateLimitProjectCache(ttl time.Duration) *rateLimitProjectCache {
+	return &rateLimitProjectCache{
+		ttl:      ttl,
+		entries:  make(map[string]rateLimitProjectCacheEntry),
+		inflight: make(map[string]*rateLimitProjectCacheInflight),
+	}
+}
+
+func (c *rateLimitProjectCache) get(projectID string, fetch func() ([]client.RateLimit, error)) ([]client.RateLimit, error) {
+	now := time.Now()
+
+	c.mu.Lock()
+	if entry, ok := c.entries[projectID]; ok && now.Sub(entry.fetchedAt) < c.ttl {
+		limits := cloneRateLimits(entry.limits)
+		c.mu.Unlock()
+		return limits, nil
+	}
+	if in, ok := c.inflight[projectID]; ok {
+		done := in.done
+		c.mu.Unlock()
+		<-done
+		if in.err != nil {
+			return nil, in.err
+		}
+		return cloneRateLimits(in.limits), nil
+	}
+
+	in := &rateLimitProjectCacheInflight{done: make(chan struct{})}
+	c.inflight[projectID] = in
+	c.mu.Unlock()
+
+	limits, err := fetch()
+
+	c.mu.Lock()
+	in.limits = cloneRateLimits(limits)
+	in.err = err
+	if err == nil {
+		c.entries[projectID] = rateLimitProjectCacheEntry{
+			fetchedAt: time.Now(),
+			limits:    cloneRateLimits(limits),
+		}
+	}
+	delete(c.inflight, projectID)
+	close(in.done)
+	c.mu.Unlock()
+
+	if err != nil {
+		return nil, err
+	}
+	return cloneRateLimits(limits), nil
+}
+
+func (c *rateLimitProjectCache) invalidate(projectID string) {
+	c.mu.Lock()
+	delete(c.entries, projectID)
+	c.mu.Unlock()
+}
+
+func cloneRateLimits(in []client.RateLimit) []client.RateLimit {
+	out := make([]client.RateLimit, len(in))
+	copy(out, in)
+	return out
+}
+
+func (r *RateLimitResource) getRateLimitCache() *rateLimitProjectCache {
+	r.rateLimitCacheInitMu.Lock()
+	defer r.rateLimitCacheInitMu.Unlock()
+
+	if r.rateLimitCache == nil {
+		r.rateLimitCache = newRateLimitProjectCache(30 * time.Second)
+	}
+	return r.rateLimitCache
+}
+
+func (r *RateLimitResource) invalidateRateLimitCache(projectID string) {
+	r.getRateLimitCache().invalidate(projectID)
+}
+
+func findRateLimitInProject(limits []client.RateLimit, modelOrRateLimitID string) *client.RateLimit {
+	searchModel := modelOrRateLimitID
+	if strings.HasPrefix(modelOrRateLimitID, "rl-") {
+		searchModel = strings.TrimPrefix(modelOrRateLimitID, "rl-")
+	}
+
+	for i := range limits {
+		if limits[i].Model == searchModel {
+			return &limits[i]
+		}
+	}
+
+	for i := range limits {
+		if limits[i].ID == modelOrRateLimitID {
+			return &limits[i]
+		}
+	}
+
+	return nil
 }
 
 func (r *RateLimitResource) Metadata(ctx context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -118,6 +241,7 @@ func (r *RateLimitResource) Configure(ctx context.Context, req resource.Configur
 		return
 	}
 	r.client = cl
+	r.rateLimitCache = newRateLimitProjectCache(30 * time.Second)
 }
 
 func (r *RateLimitResource) updateRateLimit(ctx context.Context, data *RateLimitResourceModel, resp *resource.CreateResponse) {
@@ -206,6 +330,7 @@ func (r *RateLimitResource) Create(ctx context.Context, req resource.CreateReque
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	r.invalidateRateLimitCache(projectID)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
@@ -217,13 +342,23 @@ func (r *RateLimitResource) Read(ctx context.Context, req resource.ReadRequest, 
 		return
 	}
 
-	rl, err := r.client.GetRateLimit(data.ProjectID.ValueString(), data.Model.ValueString())
+	projectID := data.ProjectID.ValueString()
+	model := data.Model.ValueString()
+	limits, err := r.getRateLimitCache().get(projectID, func() ([]client.RateLimit, error) {
+		return r.client.GetProjectRateLimits(projectID)
+	})
 	if err != nil {
-		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "rate limit not found") {
+		if strings.Contains(err.Error(), "404") {
 			resp.State.RemoveResource(ctx)
 			return
 		}
 		resp.Diagnostics.AddError("Error reading rate limit", err.Error())
+		return
+	}
+
+	rl := findRateLimitInProject(limits, model)
+	if rl == nil {
+		resp.State.RemoveResource(ctx)
 		return
 	}
 
@@ -304,6 +439,7 @@ func (r *RateLimitResource) Update(ctx context.Context, req resource.UpdateReque
 			return
 		}
 	}
+	r.invalidateRateLimitCache(data.ProjectID.ValueString())
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
@@ -331,6 +467,7 @@ func (r *RateLimitResource) Delete(ctx context.Context, req resource.DeleteReque
 		resp.Diagnostics.AddError("Error resetting rate limit", err.Error())
 		return
 	}
+	r.invalidateRateLimitCache(data.ProjectID.ValueString())
 }
 
 func (r *RateLimitResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {

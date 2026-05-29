@@ -2381,6 +2381,29 @@ func (c *OpenAIClient) ListRateLimits(projectID string, limit int, after string)
 	return &response, nil
 }
 
+// GetProjectRateLimits retrieves all rate limits for a specific project.
+func (c *OpenAIClient) GetProjectRateLimits(projectID string) ([]RateLimit, error) {
+	var allRateLimits []RateLimit
+	limit := 100
+	after := ""
+
+	for {
+		rateLimits, err := c.ListRateLimits(projectID, limit, after)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list rate limits: %w", err)
+		}
+
+		allRateLimits = append(allRateLimits, rateLimits.Data...)
+
+		if !rateLimits.HasMore {
+			break
+		}
+		after = rateLimits.LastID
+	}
+
+	return allRateLimits, nil
+}
+
 // Helper function to extract the model name from a rate limit ID
 func extractModelFromRateLimitID(rateLimitID string) string {
 	if !strings.HasPrefix(rateLimitID, "rl-") {

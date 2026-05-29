@@ -6,10 +6,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
+	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
@@ -18,6 +22,29 @@ import (
 
 var testAccProtoV6ProviderFactories = map[string]func() (tfprotov6.ProviderServer, error){
 	"openai": providerserver.NewProtocol6WithError(NewFrameworkProvider("test")()),
+}
+
+func readRateLimitForTest(t *testing.T, r *RateLimitResource, schema rschema.Schema, projectID, model string) resource.ReadResponse {
+	t.Helper()
+
+	ctx := context.Background()
+	state := tfsdk.State{Schema: schema}
+	diags := state.Set(ctx, &RateLimitResourceModel{
+		ID:          types.StringValue("rl-" + model),
+		RateLimitID: types.StringValue("rl-" + model),
+		ProjectID:   types.StringValue(projectID),
+		Model:       types.StringValue(model),
+	})
+	if diags.HasError() {
+		t.Fatalf("could not build state: %v", diags)
+	}
+
+	resp := resource.ReadResponse{State: tfsdk.State{Schema: schema}}
+	r.Read(ctx, resource.ReadRequest{State: state}, &resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read produced diagnostics: %v", resp.Diagnostics)
+	}
+	return resp
 }
 
 func init() {
@@ -126,5 +153,201 @@ func TestRateLimitResourceReadPreservesNullOptionalIntegers(t *testing.T) {
 	}
 	if !got.MaxRequestsPer1Day.IsNull() {
 		t.Fatalf("MaxRequestsPer1Day = %v, want null", got.MaxRequestsPer1Day)
+	}
+}
+
+func TestRateLimitResourceReadUsesProjectCache(t *testing.T) {
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/organization/projects/proj_test/rate_limits" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+		atomic.AddInt32(&requests, 1)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"object": "list",
+			"data": []map[string]interface{}{
+				{"id": "rl-model-a", "object": "rate_limit", "model": "model-a"},
+				{"id": "rl-model-b", "object": "rate_limit", "model": "model-b"},
+			},
+			"has_more": false,
+		})
+	}))
+	defer server.Close()
+
+	r := &RateLimitResource{
+		client:         client.NewClient("test-api-key", "", server.URL+"/v1"),
+		rateLimitCache: newRateLimitProjectCache(30 * time.Second),
+	}
+	schema := currentSchema(t, r)
+
+	readRateLimitForTest(t, r, schema, "proj_test", "model-a")
+	readRateLimitForTest(t, r, schema, "proj_test", "model-b")
+
+	if got := atomic.LoadInt32(&requests); got != 1 {
+		t.Fatalf("requests = %d, want 1", got)
+	}
+}
+
+func TestRateLimitResourceReadCollapsesConcurrentProjectCacheMiss(t *testing.T) {
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/organization/projects/proj_test/rate_limits" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+		atomic.AddInt32(&requests, 1)
+		time.Sleep(50 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"object": "list",
+			"data": []map[string]interface{}{
+				{"id": "rl-model-a", "object": "rate_limit", "model": "model-a"},
+				{"id": "rl-model-b", "object": "rate_limit", "model": "model-b"},
+			},
+			"has_more": false,
+		})
+	}))
+	defer server.Close()
+
+	r := &RateLimitResource{
+		client:         client.NewClient("test-api-key", "", server.URL+"/v1"),
+		rateLimitCache: newRateLimitProjectCache(30 * time.Second),
+	}
+	schema := currentSchema(t, r)
+
+	var wg sync.WaitGroup
+	for _, model := range []string{"model-a", "model-b"} {
+		wg.Add(1)
+		go func(model string) {
+			defer wg.Done()
+			readRateLimitForTest(t, r, schema, "proj_test", model)
+		}(model)
+	}
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&requests); got != 1 {
+		t.Fatalf("requests = %d, want 1", got)
+	}
+}
+
+func TestRateLimitResourceProjectCacheTTLExpires(t *testing.T) {
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/organization/projects/proj_test/rate_limits" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+		atomic.AddInt32(&requests, 1)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"object": "list",
+			"data": []map[string]interface{}{
+				{"id": "rl-model-a", "object": "rate_limit", "model": "model-a"},
+			},
+			"has_more": false,
+		})
+	}))
+	defer server.Close()
+
+	r := &RateLimitResource{
+		client:         client.NewClient("test-api-key", "", server.URL+"/v1"),
+		rateLimitCache: newRateLimitProjectCache(10 * time.Millisecond),
+	}
+	schema := currentSchema(t, r)
+
+	readRateLimitForTest(t, r, schema, "proj_test", "model-a")
+	time.Sleep(20 * time.Millisecond)
+	readRateLimitForTest(t, r, schema, "proj_test", "model-a")
+
+	if got := atomic.LoadInt32(&requests); got != 2 {
+		t.Fatalf("requests = %d, want 2", got)
+	}
+}
+
+func TestRateLimitResourceInvalidateProjectCache(t *testing.T) {
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/organization/projects/proj_test/rate_limits" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+		atomic.AddInt32(&requests, 1)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"object": "list",
+			"data": []map[string]interface{}{
+				{"id": "rl-model-a", "object": "rate_limit", "model": "model-a"},
+			},
+			"has_more": false,
+		})
+	}))
+	defer server.Close()
+
+	r := &RateLimitResource{
+		client:         client.NewClient("test-api-key", "", server.URL+"/v1"),
+		rateLimitCache: newRateLimitProjectCache(30 * time.Second),
+	}
+	schema := currentSchema(t, r)
+
+	readRateLimitForTest(t, r, schema, "proj_test", "model-a")
+	r.invalidateRateLimitCache("proj_test")
+	readRateLimitForTest(t, r, schema, "proj_test", "model-a")
+
+	if got := atomic.LoadInt32(&requests); got != 2 {
+		t.Fatalf("requests = %d, want 2", got)
+	}
+}
+
+func TestRateLimitResourceUpdateInvalidatesProjectCache(t *testing.T) {
+	var listRequests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/organization/projects/proj_test/rate_limits":
+			atomic.AddInt32(&listRequests, 1)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"object": "list",
+				"data": []map[string]interface{}{
+					{"id": "rl-model-a", "object": "rate_limit", "model": "model-a"},
+				},
+				"has_more": false,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/organization/projects/proj_test/rate_limits/rl-model-a":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":      "rl-model-a",
+				"object":  "rate_limit",
+				"model":   "model-a",
+				"updated": true,
+			})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	r := &RateLimitResource{
+		client:         client.NewClient("test-api-key", "", server.URL+"/v1"),
+		rateLimitCache: newRateLimitProjectCache(30 * time.Second),
+	}
+	schema := currentSchema(t, r)
+
+	readRateLimitForTest(t, r, schema, "proj_test", "model-a")
+
+	ctx := context.Background()
+	plan := tfsdk.Plan{Schema: schema}
+	diags := plan.Set(ctx, &RateLimitResourceModel{
+		ID:                   types.StringValue("rl-model-a"),
+		RateLimitID:          types.StringValue("rl-model-a"),
+		ProjectID:            types.StringValue("proj_test"),
+		Model:                types.StringValue("model-a"),
+		MaxRequestsPerMinute: types.Int64Value(123),
+	})
+	if diags.HasError() {
+		t.Fatalf("could not build plan: %v", diags)
+	}
+
+	updateResp := resource.UpdateResponse{State: tfsdk.State{Schema: schema}}
+	r.Update(ctx, resource.UpdateRequest{Plan: plan}, &updateResp)
+	if updateResp.Diagnostics.HasError() {
+		t.Fatalf("Update produced diagnostics: %v", updateResp.Diagnostics)
+	}
+
+	readRateLimitForTest(t, r, schema, "proj_test", "model-a")
+
+	if got := atomic.LoadInt32(&listRequests); got != 3 {
+		t.Fatalf("listRequests = %d, want 3", got)
 	}
 }
