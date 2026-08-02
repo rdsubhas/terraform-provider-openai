@@ -9,7 +9,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-	"github.com/mkdev-me/terraform-provider-openai/internal/client"
+	"github.com/rdsubhas/terraform-provider-openai/v3/internal/client"
 )
 
 // Ensure implementation satisfies interfaces.

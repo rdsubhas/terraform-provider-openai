@@ -63,7 +63,7 @@ func TestAccStateMigration_ProjectUser_V0ToV1(t *testing.T) {
 			{
 				ExternalProviders: map[string]resource.ExternalProvider{
 					"openai": {
-						Source:            "mkdev-me/openai",
+						Source:            "rdsubhas/openai",
 						VersionConstraint: "= 2.0.0",
 					},
 				},
@@ -131,10 +131,10 @@ resource "openai_project_user" "test" {
 // (after the upgrader runs).
 type mockOpenAIServer struct {
 	*httptest.Server
-	t       *testing.T
-	mu      sync.Mutex
-	users   map[string]*mockUser  // key: project_id|user_id
-	groups  map[string]*mockGroup // key: project_id|group_id
+	t      *testing.T
+	mu     sync.Mutex
+	users  map[string]*mockUser  // key: project_id|user_id
+	groups map[string]*mockGroup // key: project_id|group_id
 }
 
 type mockUser struct {

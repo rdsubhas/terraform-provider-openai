@@ -6,7 +6,7 @@ import (
 	"log"
 
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
-	"github.com/mkdev-me/terraform-provider-openai/internal/provider"
+	"github.com/rdsubhas/terraform-provider-openai/v3/internal/provider"
 )
 
 // Run "go generate" to format example terraform files and generate the docs for the registry/website
@@ -38,7 +38,7 @@ func main() {
 	}
 
 	opts := providerserver.ServeOpts{
-		Address: "registry.terraform.io/mkdev-me/openai",
+		Address: "registry.terraform.io/rdsubhas/openai",
 		Debug:   debug,
 	}
 

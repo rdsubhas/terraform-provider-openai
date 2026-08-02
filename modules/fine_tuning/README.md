@@ -152,9 +152,9 @@ If you encounter a 401 Unauthorized error with a message about missing scopes:
 | Timeout during apply | Fine-tuning job is still running | Use `cancel_after_timeout` or increase Terraform timeout |
 | Invalid model | The specified model doesn't support fine-tuning | Use a supported model (e.g., gpt-4o-mini-2024-07-18, gpt-3.5-turbo) |
 
-For more detailed troubleshooting, refer to the [OpenAI Provider Troubleshooting Guide](../../docs/TROUBLESHOOTING.md).
+For provider setup and support information, refer to the [repository README](../../README.md).
 
 ## Related Resources
 
 - [OpenAI Fine-Tuning API Documentation](https://platform.openai.com/docs/api-reference/fine-tuning)
-- [Fine-Tuning Best Practices](https://platform.openai.com/docs/guides/fine-tuning) 
+- [Fine-Tuning Best Practices](https://platform.openai.com/docs/guides/fine-tuning)

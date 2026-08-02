@@ -15,7 +15,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-	"github.com/mkdev-me/terraform-provider-openai/internal/client"
+	"github.com/rdsubhas/terraform-provider-openai/v3/internal/client"
 )
 
 var _ resource.Resource = &ResponseResource{}

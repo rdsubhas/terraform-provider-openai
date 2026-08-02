@@ -129,7 +129,7 @@ func (d *ProjectDataSource) Read(ctx context.Context, req datasource.ReadRequest
 	// Create request manually to allow overriding header
 	// Note: d.client.OpenAIClient exposes DoRequest but seemingly not easy header override per request if using the helper method.
 	// We might need to access the underlying HTTP client or use a method that allows custom headers if `d.client` exposes it.
-	// The `OpenAIClient` wrapper in `provider.go` usually just wraps the `mkdev-me/go-openai` client or similar.
+	// The `OpenAIClient` wrapper in `provider.go` uses the provider's internal client implementation.
 	// Looking at `Configure` in `provider_framework.go`: `providerClient` has `OpenAIClient`, `ProjectAPIKey`, `AdminAPIKey`.
 
 	// If we use `d.client.OpenAIClient.DoRequest`, it likely uses the configured key (Project Key).

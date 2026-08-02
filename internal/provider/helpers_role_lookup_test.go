@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mkdev-me/terraform-provider-openai/internal/client"
+	"github.com/rdsubhas/terraform-provider-openai/v3/internal/client"
 )
 
 // init effectively disables the admin rate limiter for the test binary.
