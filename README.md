@@ -1,10 +1,16 @@
-# Terraform Provider for OpenAI
+# Terraform Provider for OpenAI (Independent)
 
-[![Release](https://img.shields.io/github/v/release/mkdev-me/terraform-provider-openai)](https://github.com/mkdev-me/terraform-provider-openai/releases)
-[![Go Report Card](https://goreportcard.com/badge/github.com/mkdev-me/terraform-provider-openai)](https://goreportcard.com/report/github.com/mkdev-me/terraform-provider-openai)
+[![Release](https://img.shields.io/github/v/release/rdsubhas/terraform-provider-openai)](https://github.com/rdsubhas/terraform-provider-openai/releases)
+[![Go Report Card](https://goreportcard.com/badge/github.com/rdsubhas/terraform-provider-openai/v3)](https://goreportcard.com/report/github.com/rdsubhas/terraform-provider-openai/v3)
 [![License: MPL-2.0](https://img.shields.io/badge/License-MPL--2.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
 
 A comprehensive Terraform provider for managing OpenAI resources, enabling infrastructure-as-code management of OpenAI's API services including chat completions, assistants, fine-tuning, embeddings, and more.
+
+> [!IMPORTANT]
+> This is an independently maintained, permanent fork of
+> [mkdev-me/terraform-provider-openai](https://github.com/mkdev-me/terraform-provider-openai).
+> It is not affiliated with, endorsed by, or maintained by OpenAI. This fork does not
+> synchronize future upstream changes.
 
 ## Features
 
@@ -30,7 +36,7 @@ A comprehensive Terraform provider for managing OpenAI resources, enabling infra
 ## Requirements
 
 - [Terraform](https://www.terraform.io/downloads.html) >= 1.0
-- [Go](https://golang.org/doc/install) >= 1.21 (for development)
+- [Go](https://go.dev/doc/install) >= 1.25.8 (for development)
 - OpenAI API Key
 
 ## Installation
@@ -41,8 +47,8 @@ A comprehensive Terraform provider for managing OpenAI resources, enabling infra
 terraform {
   required_providers {
     openai = {
-      source  = "mkdev-me/openai"
-      version = "~> 0.1"
+      source  = "rdsubhas/openai"
+      version = "~> 3.0"
     }
   }
 }
@@ -52,13 +58,29 @@ provider "openai" {
 }
 ```
 
+### Migrating from `mkdev-me/openai`
+
+The fork has a different global provider address even though its resource schemas are
+compatible. Back up your state, replace the provider address, update your
+`required_providers` block, and reinitialize:
+
+```bash
+terraform state replace-provider \
+  registry.terraform.io/mkdev-me/openai \
+  registry.terraform.io/rdsubhas/openai
+terraform init -upgrade
+terraform plan
+```
+
+See [MIGRATION.md](MIGRATION.md) for the complete migration procedure.
+
 ### Manual Installation
 
 For development or if you need the latest unreleased version:
 
 ```bash
 # Clone the repository
-git clone https://github.com/mkdev-me/terraform-provider-openai.git
+git clone https://github.com/rdsubhas/terraform-provider-openai.git
 cd terraform-provider-openai
 
 # Build and install in one command
@@ -73,7 +95,7 @@ For provider developers, this repository includes a comprehensive Makefile with 
 
 ```bash
 # Clone and setup
-git clone https://github.com/mkdev-me/terraform-provider-openai.git
+git clone https://github.com/rdsubhas/terraform-provider-openai.git
 cd terraform-provider-openai
 
 # Install dependencies and build
@@ -159,23 +181,11 @@ Make sure to run `tfplugindocs` if resources are updated.
 
 ## Releasing
 
-The release process is automated using [Release Drafter](https://github.com/release-drafter/release-drafter) and GitHub Actions.
+Releases are built, signed, and published by GitHub Actions from an explicit stable
+semantic version tag. HCP Terraform owns the active `rdsubhas` public namespace and
+ingests published GitHub releases through the Terraform Cloud GitHub App.
 
-### Automated Release Notes
-A draft release is automatically created and updated as Pull Requests are merged. The changelog is categorized based on PR labels:
-- `feature`, `feat` -> 🚀 Features
-- `fix`, `bug` -> 🐛 Bug Fixes
-- `chore`, `docs`, `refactor`, `style`, `test` -> 🧰 Maintenance
-
-### Cutting a New Release
-To publish a new release:
-
-1. Go to **Actions** -> **Bump Version**.
-2. Click **Run workflow**.
-3. This will:
-    - Calculate the next semantic version based on the labels of merged PRs since the last release.
-    - Create and push a new git tag.
-    - Trigger the official Release workflow which builds binaries and publishes them.
+See [RELEASING.md](RELEASING.md) for the release procedure and signing-key setup.
 
 ## Testing
 
@@ -238,8 +248,8 @@ terraform destroy
 terraform {
   required_providers {
     openai = {
-      source  = "mkdev-me/openai"
-      version = "~> 0.1"
+      source  = "rdsubhas/openai"
+      version = "~> 3.0"
     }
   }
 }
@@ -421,10 +431,9 @@ For initial setup, it's recommended to:
 ## API Key Troubleshooting
 
 If you encounter API key issues:
-- Verify keys are correctly set with `echo $OPENAI_API_KEY`
-- Explicitly set keys in provider configuration instead of using environment variables
-- For resource-specific keys, use the `api_key` parameter on supported resources
-- See [Troubleshooting Guide](docs/TROUBLESHOOTING.md#api-key-configuration-and-troubleshooting) for more details
+- Verify the expected environment variables are set.
+- Explicitly set keys in provider configuration instead of using environment variables.
+- For resource-specific keys, use the `api_key` parameter on supported resources.
 
 ## Documentation
 
@@ -434,16 +443,15 @@ If you encounter API key issues:
 - [Examples](examples/): Complete working examples for all features
 
 ### Reference Documentation
-- [Terraform Registry Documentation](https://registry.terraform.io/providers/mkdev-me/openai/latest/docs): Official provider documentation
+- [Terraform Registry Documentation](https://registry.terraform.io/providers/rdsubhas/openai/latest/docs): Published provider documentation
 - [Resources](docs/resources/): Comprehensive resource documentation
 - [Data Sources](docs/data-sources/): Data source documentation
 - [Modules](modules/): Reusable Terraform modules
 
 ### Guides and Support
-- [Authentication Guide](#authentication-and-api-key-requirements): API key setup and requirements
 - [Testing Guide](#testing): How to test the provider
 - [Development Guide](#development): For contributors
-- [Troubleshooting](docs/TROUBLESHOOTING.md): Common issues and solutions
+- [Migration Guide](MIGRATION.md): Move state from the upstream provider address
 
 ## Contributing
 
@@ -451,12 +459,11 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Mozilla Public License 2.0 - see [LICENSE](LICENSE).
 
 ## Support
 
 For issues, feature requests, or questions:
-- [GitHub Issues](https://github.com/mkdev-me/terraform-provider-openai/issues)
+- [GitHub Issues](https://github.com/rdsubhas/terraform-provider-openai/issues)
 - [Documentation](docs/)
 - [Examples](examples/)
-

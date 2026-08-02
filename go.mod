@@ -1,4 +1,4 @@
-module github.com/mkdev-me/terraform-provider-openai
+module github.com/rdsubhas/terraform-provider-openai/v3
 
 go 1.25.8
 

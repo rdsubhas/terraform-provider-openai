@@ -69,7 +69,7 @@ output "gpt4_limit" {
 
 ## Provider Compatibility
 
-This module requires the `mkdev-me/openai` provider version `~> 1.0.0` and uses the now fully implemented `openai_rate_limit` resource.
+This module requires the `rdsubhas/openai` provider version `~> 3.0` and uses the `openai_rate_limit` resource.
 
 ## Variables
 
@@ -118,4 +118,4 @@ When you remove a rate limit resource from your Terraform configuration and run 
 
 - For full functionality, your API key must have appropriate permissions to modify rate limits
 - Project API keys can set rate limits for their own project only
-- Organization admin keys have full permissions to set rate limits for any project 
+- Organization admin keys have full permissions to set rate limits for any project

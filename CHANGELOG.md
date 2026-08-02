@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Establish the repository as the independently maintained `rdsubhas/openai`
+  provider, with Go module path `github.com/rdsubhas/terraform-provider-openai/v3`.
+- Prepare signed protocol-v6 releases and the HCP Terraform public namespace for
+  the first stable fork release, `v3.0.0`.
+
+### Migration
+- Existing `mkdev-me/openai` state must be reassigned with `terraform state
+  replace-provider` before upgrading to `rdsubhas/openai`.
+
 ### Fixed
 - Admin-API calls are now paced by a token-bucket rate limiter (default 6
   RPM with a burst of 4) in addition to the v2.2.6 concurrency semaphore.
@@ -196,5 +206,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Example configurations for common use cases
 - Reusable Terraform modules for common patterns
 
-[Unreleased]: https://github.com/mkdev-me/terraform-provider-openai/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/mkdev-me/terraform-provider-openai/releases/tag/v0.1.0
+[Unreleased]: https://github.com/rdsubhas/terraform-provider-openai/compare/v2.3.1-enhanced...HEAD
+[0.1.0]: https://github.com/rdsubhas/terraform-provider-openai/releases/tag/v0.1.0

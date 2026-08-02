@@ -12,7 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-	"github.com/mkdev-me/terraform-provider-openai/internal/client"
+	"github.com/rdsubhas/terraform-provider-openai/v3/internal/client"
 )
 
 // Default API URL if not specified
