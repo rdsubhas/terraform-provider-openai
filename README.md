@@ -8,24 +8,26 @@
 Manage OpenAI projects, access, files, models, vector stores, fine-tuning, and model
 operations with Terraform.
 
-## Built for large OpenAI organizations
+## Built for high-volume OpenAI administration
 
-This provider is designed to manage dozens of projects, groups, models, and policies in
-one Terraform graph without repeatedly restarting plans or applies. Compared with the
-original release line, it adds:
+This fork is for Terraform configurations that manage hundreds of OpenAI projects and
+thousands of project rate limits. At that volume, one API request per resource causes
+slow refreshes and frequent `429 Too Many Requests` failures.
 
-- Pacing and retries driven by OpenAI's rate-limit headers across administrative APIs
-- Shared, coalesced list caches that collapse concurrent reads and invalidate safely
-  after mutations
-- Project and organization spend limits and alerts, project model permissions, and
-  correct handling of rate-limit fields where `null` and `0` mean different things
+The provider reduces that load by:
 
-These functional requirements led to a permanent fork of
-[mkdev-me/terraform-provider-openai](https://github.com/mkdev-me/terraform-provider-openai),
-whose contributors built the provider's foundation. Future upstream changes are not
-automatically synchronized. This is not an official OpenAI provider and is not
-affiliated with or endorsed by OpenAI; earlier work remains credited in the Git history
-and under the MPL-2.0 license.
+- Sharing and coalescing list calls across concurrent resources
+- Caching list results briefly and invalidating them after creates, updates, or deletes
+- Pacing and retrying administrative API calls from OpenAI's rate-limit headers
+
+It also adds project and organization spend limits and alerts, project model
+permissions, and correct handling of rate-limit fields where `null` and `0` have
+different meanings.
+
+This is a permanent fork of
+[mkdev-me/terraform-provider-openai](https://github.com/mkdev-me/terraform-provider-openai).
+It is maintained separately, does not automatically sync upstream changes, and is not
+an official OpenAI provider.
 
 ## Quick start
 
