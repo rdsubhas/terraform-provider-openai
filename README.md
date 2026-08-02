@@ -8,24 +8,23 @@
 Manage OpenAI projects, access, files, models, vector stores, fine-tuning, and model
 operations with Terraform.
 
-## Built for high-volume OpenAI administration
+## About this fork
 
-This fork is for Terraform configurations that manage hundreds of OpenAI projects and
-thousands of project rate limits. At that volume, one API request per resource causes
-slow refreshes and frequent `429 Too Many Requests` failures.
-
-The provider reduces that load by:
-
-- Sharing and coalescing list calls across concurrent resources
-- Caching list results briefly and invalidating them after creates, updates, or deletes
-- Pacing and retrying administrative API calls from OpenAI's rate-limit headers
-
-It also adds project and organization spend limits and alerts, project model
-permissions, and correct handling of rate-limit fields where `null` and `0` have
-different meanings.
-
-This is an independent fork of
+This project is a fork of
 [mkdev-me/terraform-provider-openai](https://github.com/mkdev-me/terraform-provider-openai).
+It adds Terraform support for more OpenAI Admin API resources and is built for
+high-volume environments.
+
+The provider is designed for configurations with hundreds of OpenAI projects and
+thousands of project rate limits. Admin API coverage includes project model
+permissions, project and organization spend limits, and spend alerts.
+
+To keep refreshes and applies reliable at that scale, the provider:
+
+- Shares and coalesces list calls across concurrent resources
+- Caches list results briefly and invalidates them after creates, updates, or deletes
+- Paces and retries administrative API calls using OpenAI's rate-limit headers
+- Preserves the difference between `null` and `0` in rate-limit fields
 
 ## Quick start
 
