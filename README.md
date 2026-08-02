@@ -24,10 +24,8 @@ It also adds project and organization spend limits and alerts, project model
 permissions, and correct handling of rate-limit fields where `null` and `0` have
 different meanings.
 
-This is a permanent fork of
+This is an independent fork of
 [mkdev-me/terraform-provider-openai](https://github.com/mkdev-me/terraform-provider-openai).
-It is maintained separately, does not automatically sync upstream changes, and is not
-an official OpenAI provider.
 
 ## Quick start
 
