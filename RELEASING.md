@@ -46,10 +46,14 @@ repository.
 
 1. Ensure `main` is green and contains all intended release changes.
 2. In GitHub Actions, run **Bump Version** with a stable tag such as `v3.0.0`.
-3. The tag triggers **Release**, which publishes signed archives and checksums.
+3. **Bump Version** creates the tag and calls **Release**, which publishes signed
+   archives and checksums.
 4. Verify the release contains six platform ZIPs, the Registry manifest,
    `SHA256SUMS`, and `SHA256SUMS.sig`.
 5. Verify the version under **HCP Terraform → Registry → Public namespaces →
    rdsubhas → openai**. Use **Resync** if ingestion does not start automatically.
+
+If a tag exists but its release was not published, run **Release** manually with that
+existing stable tag. Do not delete or recreate the tag.
 
 Never replace assets for an existing release. Publish corrections as a new version.
