@@ -8,19 +8,24 @@
 Manage OpenAI projects, access, files, models, vector stores, fine-tuning, and model
 operations with Terraform.
 
-## Why this fork
+## Built for large OpenAI organizations
 
-This is a permanent, independently maintained fork of
+This provider is designed to manage dozens of projects, groups, models, and policies in
+one Terraform graph without repeatedly restarting plans or applies. Compared with the
+original release line, it adds:
+
+- Pacing and retries driven by OpenAI's rate-limit headers across administrative APIs
+- Shared, coalesced list caches that collapse concurrent reads and invalidate safely
+  after mutations
+- Project and organization spend limits and alerts, project model permissions, and
+  correct handling of rate-limit fields where `null` and `0` mean different things
+
+These functional requirements led to a permanent fork of
 [mkdev-me/terraform-provider-openai](https://github.com/mkdev-me/terraform-provider-openai),
-whose contributors created the foundation of this provider.
-
-The fork exists to provide a durable release path under `rdsubhas/openai`: independent
-versioning, CI, maintenance, and publishing through an HCP Terraform public namespace.
-That allows fixes and OpenAI API support to ship without depending on upstream releases.
-It does not automatically synchronize future upstream changes.
-
-This is not an official OpenAI provider and is not affiliated with or endorsed by
-OpenAI. Earlier work remains credited in the Git history and under the MPL-2.0 license.
+whose contributors built the provider's foundation. Future upstream changes are not
+automatically synchronized. This is not an official OpenAI provider and is not
+affiliated with or endorsed by OpenAI; earlier work remains credited in the Git history
+and under the MPL-2.0 license.
 
 ## Quick start
 
