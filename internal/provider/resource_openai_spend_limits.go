@@ -7,6 +7,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -32,27 +33,27 @@ type OrganizationSpendLimitResource struct {
 	client *OpenAIClient
 }
 
-type SpendLimitEnforcementModel struct {
-	Status types.String `tfsdk:"status"`
+var spendLimitEnforcementAttributeTypes = map[string]attr.Type{
+	"status": types.StringType,
 }
 
 type ProjectSpendLimitResourceModel struct {
-	ID              types.String                `tfsdk:"id"`
-	ProjectID       types.String                `tfsdk:"project_id"`
-	ThresholdAmount types.Int64                 `tfsdk:"threshold_amount"`
-	Currency        types.String                `tfsdk:"currency"`
-	Interval        types.String                `tfsdk:"interval"`
-	Enforcement     *SpendLimitEnforcementModel `tfsdk:"enforcement"`
-	Object          types.String                `tfsdk:"object"`
+	ID              types.String `tfsdk:"id"`
+	ProjectID       types.String `tfsdk:"project_id"`
+	ThresholdAmount types.Int64  `tfsdk:"threshold_amount"`
+	Currency        types.String `tfsdk:"currency"`
+	Interval        types.String `tfsdk:"interval"`
+	Enforcement     types.Object `tfsdk:"enforcement"`
+	Object          types.String `tfsdk:"object"`
 }
 
 type OrganizationSpendLimitResourceModel struct {
-	ID              types.String                `tfsdk:"id"`
-	ThresholdAmount types.Int64                 `tfsdk:"threshold_amount"`
-	Currency        types.String                `tfsdk:"currency"`
-	Interval        types.String                `tfsdk:"interval"`
-	Enforcement     *SpendLimitEnforcementModel `tfsdk:"enforcement"`
-	Object          types.String                `tfsdk:"object"`
+	ID              types.String `tfsdk:"id"`
+	ThresholdAmount types.Int64  `tfsdk:"threshold_amount"`
+	Currency        types.String `tfsdk:"currency"`
+	Interval        types.String `tfsdk:"interval"`
+	Enforcement     types.Object `tfsdk:"enforcement"`
+	Object          types.String `tfsdk:"object"`
 }
 
 func spendLimitAttributes(idDescription string) map[string]schema.Attribute {
@@ -118,8 +119,11 @@ func spendLimitRequestFromValues(thresholdAmount types.Int64, currency, interval
 	}
 }
 
-func spendLimitEnforcementState(value *SpendLimitAPI) *SpendLimitEnforcementModel {
-	return &SpendLimitEnforcementModel{Status: types.StringValue(value.Enforcement.Status)}
+func spendLimitEnforcementState(value *SpendLimitAPI) types.Object {
+	return types.ObjectValueMust(
+		spendLimitEnforcementAttributeTypes,
+		map[string]attr.Value{"status": types.StringValue(value.Enforcement.Status)},
+	)
 }
 
 func NewProjectSpendLimitResource() resource.Resource {

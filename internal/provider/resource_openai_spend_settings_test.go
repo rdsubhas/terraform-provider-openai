@@ -65,6 +65,18 @@ func assertAdminAuthorization(t *testing.T, r *http.Request) {
 	}
 }
 
+func spendLimitEnforcementStatus(t *testing.T, enforcement types.Object) string {
+	t.Helper()
+	if enforcement.IsNull() || enforcement.IsUnknown() {
+		t.Fatalf("enforcement must be known: %v", enforcement)
+	}
+	status, ok := enforcement.Attributes()["status"].(types.String)
+	if !ok {
+		t.Fatalf("enforcement.status has unexpected type: %T", enforcement.Attributes()["status"])
+	}
+	return status.ValueString()
+}
+
 func TestProjectSpendLimitResourceLifecycle(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	resetProjectSettingsCacheForTest()
@@ -115,6 +127,7 @@ func TestProjectSpendLimitResourceLifecycle(t *testing.T) {
 		ThresholdAmount: types.Int64Value(10000),
 		Currency:        types.StringValue("USD"),
 		Interval:        types.StringValue("month"),
+		Enforcement:     types.ObjectUnknown(spendLimitEnforcementAttributeTypes),
 		Object:          types.StringUnknown(),
 	}
 	createResp := resource.CreateResponse{State: tfsdk.State{Schema: schema}}
@@ -127,7 +140,7 @@ func TestProjectSpendLimitResourceLifecycle(t *testing.T) {
 	if diags := createResp.State.Get(ctx, &state); diags.HasError() {
 		t.Fatalf("could not read create state: %v", diags)
 	}
-	if state.ID.ValueString() != "proj_test" || state.Enforcement == nil || state.Enforcement.Status.ValueString() != "enforcing" {
+	if state.ID.ValueString() != "proj_test" || spendLimitEnforcementStatus(t, state.Enforcement) != "enforcing" {
 		t.Fatalf("unexpected create state: %#v", state)
 	}
 
@@ -207,6 +220,7 @@ func TestOrganizationSpendLimitResourceLifecycle(t *testing.T) {
 		ThresholdAmount: types.Int64Value(20000),
 		Currency:        types.StringValue("USD"),
 		Interval:        types.StringValue("month"),
+		Enforcement:     types.ObjectUnknown(spendLimitEnforcementAttributeTypes),
 		Object:          types.StringUnknown(),
 	}
 	createResp := resource.CreateResponse{State: tfsdk.State{Schema: schema}}
@@ -237,7 +251,7 @@ func TestOrganizationSpendLimitResourceLifecycle(t *testing.T) {
 	if diags := readResp.State.Get(ctx, &refreshed); diags.HasError() {
 		t.Fatalf("could not read refreshed state: %v", diags)
 	}
-	if refreshed.ThresholdAmount.ValueInt64() != 30000 || refreshed.Enforcement.Status.ValueString() != "enforcing" {
+	if refreshed.ThresholdAmount.ValueInt64() != 30000 || spendLimitEnforcementStatus(t, refreshed.Enforcement) != "enforcing" {
 		t.Fatalf("unexpected refreshed state: %#v", refreshed)
 	}
 
@@ -529,8 +543,10 @@ func TestSpendGovernanceReadAndDelete404(t *testing.T) {
 			ThresholdAmount: types.Int64Value(1),
 			Currency:        types.StringValue("USD"),
 			Interval:        types.StringValue("month"),
-			Enforcement:     &SpendLimitEnforcementModel{Status: types.StringValue("enforcing")},
-			Object:          types.StringValue("project.spend_limit"),
+			Enforcement: spendLimitEnforcementState(&SpendLimitAPI{
+				Enforcement: SpendLimitEnforcementAPI{Status: "enforcing"},
+			}),
+			Object: types.StringValue("project.spend_limit"),
 		})
 		readResp := resource.ReadResponse{State: tfsdk.State{Schema: schema}}
 		r.Read(ctx, resource.ReadRequest{State: state}, &readResp)
@@ -552,8 +568,10 @@ func TestSpendGovernanceReadAndDelete404(t *testing.T) {
 			ThresholdAmount: types.Int64Value(1),
 			Currency:        types.StringValue("USD"),
 			Interval:        types.StringValue("month"),
-			Enforcement:     &SpendLimitEnforcementModel{Status: types.StringValue("enforcing")},
-			Object:          types.StringValue("organization.spend_limit"),
+			Enforcement: spendLimitEnforcementState(&SpendLimitAPI{
+				Enforcement: SpendLimitEnforcementAPI{Status: "enforcing"},
+			}),
+			Object: types.StringValue("organization.spend_limit"),
 		})
 		readResp := resource.ReadResponse{State: tfsdk.State{Schema: schema}}
 		r.Read(ctx, resource.ReadRequest{State: state}, &readResp)
